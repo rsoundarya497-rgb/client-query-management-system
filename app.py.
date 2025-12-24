@@ -1,13 +1,47 @@
 import streamlit as st
 import pandas as pd
-from db_utils import insert_query, get_all_queries, get_query_stats, close_query
-import io
+from db_utils import (
+    insert_query,
+    get_all_queries,
+    get_queries_by_email,
+    get_query_stats,
+    close_query,
+    delete_all_queries,
+    insert_bulk_queries
+)
 
 st.set_page_config(page_title="Client Query Submission System", layout="wide")
 
+# ---------------------------
+# SESSION INITIALIZATION
+# ---------------------------
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
+if "role" not in st.session_state:
     st.session_state.role = None
+if "username" not in st.session_state:
+    st.session_state.username = None
+
+# ---------------------------
+# 10 USER CREDENTIALS
+# (8 Clients + 2 Support)
+# ---------------------------
+CREDENTIALS = {
+    "Client": {
+        "client01": "client123",
+        "client02": "client123",
+        "client03": "client123",
+        "client04": "client123",
+        "client05": "client123",
+        "client06": "client123",
+        "client07": "client123",
+        "client08": "client123",
+    },
+    "Support": {
+        "admin": "admin123",
+        "support01": "support123",
+    }
+}
 
 # --------- Login Page ----------
 def login_page():
@@ -17,99 +51,185 @@ def login_page():
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
 
-    if st.button("Login"):
-        # Demo credentials
-        if role == "Client" and username == "client" and password == "client123":
-            st.session_state.logged_in = True
-            st.session_state.role = "Client"
-            st.success("Login successful")
-            st.rerun()
-
-        elif role == "Support" and username == "admin" and password == "admin123":
-            st.session_state.logged_in = True
-            st.session_state.role = "Support"
-            st.success("Login successful")
-            st.rerun()
-
+    with st.expander("Show demo credentials"):
+        if role == "Client":
+            st.write("Client Users: client01 to client08 | Password: client123")
         else:
-            st.error("Invalid username or password")
+            st.write("Support Users: admin (admin123), support01 (support123)")
+
+    if st.button("Login"):
+        role_users = CREDENTIALS.get(role, {})
+        if username in role_users and role_users[username] == password:
+            st.session_state.logged_in = True
+            st.session_state.role = role
+            st.session_state.username = username
+            st.success("✅ Login successful")
+            st.rerun()
+        else:
+            st.error("❌ Invalid username or password")
+
+
+def logout_button():
+    if st.button("Logout"):
+        st.session_state.logged_in = False
+        st.session_state.role = None
+        st.session_state.username = None
+        st.rerun()
+
+
+def client_portal():
+    st.header("👤 Client Portal")
+
+    # Submit a Query
+    st.subheader("Submit a Query")
+    mail_id = st.text_input("Email ID")
+    mobile = st.text_input("Mobile Number")
+    heading = st.text_input("Query Heading")
+    description = st.text_area("Query Description")
+
+    if st.button("Submit Query"):
+        if mail_id and mobile and heading and description:
+            ok = insert_query(mail_id, mobile, heading, description)
+            if ok:
+                st.success("✅ Query submitted successfully!")
+            else:
+                st.error("❌ Failed to submit query. Check DB connection.")
+        else:
+            st.warning("⚠️ Please fill all fields")
+
+    st.divider()
+
+    # View only client's queries
+    st.subheader("📌 My Submitted Queries (Only My Email)")
+    if mail_id:
+        my_data = get_queries_by_email(mail_id)
+        if my_data:
+            df_my = pd.DataFrame(my_data)
+
+            status_filter = st.selectbox(
+                "Filter by Status",
+                ["All", "Open", "Closed"],
+                key="client_status_filter"
+            )
+
+            if status_filter != "All" and "status" in df_my.columns:
+                df_my = df_my[df_my["status"] == status_filter]
+
+            st.dataframe(df_my, use_container_width=True)
+        else:
+            st.info("You have not submitted any queries with this email yet.")
+    else:
+        st.info("Enter your Email ID above to view your queries.")
+
+
+def support_portal():
+    st.header("🛠 Support Team Dashboard")
+
+    # ================= ADMIN: REPLACE HISTORY =================
+    st.subheader("⚠️ Admin: Replace Old History (CSV Import)")
+    uploaded_file = st.file_uploader("Upload CSV file to replace history", type=["csv"])
+
+    if uploaded_file is not None:
+        df_new = pd.read_csv(uploaded_file)
+
+        with st.expander("Preview uploaded CSV (optional)"):
+            st.dataframe(df_new.head(30), use_container_width=True)
+
+        # --- Map CSV columns -> DB columns (if your CSV has these names) ---
+        rename_map = {
+            "client_email": "mail_id",
+            "client_mobile": "mobile_number",
+            "date_raised": "query_created_time",
+            "date_closed": "query_closed_time",
+        }
+        df_mapped = df_new.rename(columns=rename_map)
+
+        required = ["mail_id", "mobile_number", "query_heading", "query_description"]
+        missing = [c for c in required if c not in df_mapped.columns]
+
+        if missing:
+            st.error(f"CSV is missing required columns after mapping: {missing}")
+        else:
+            if "status" not in df_mapped.columns:
+                df_mapped["status"] = "Open"
+
+            if "query_created_time" in df_mapped.columns:
+                df_mapped["query_created_time"] = pd.to_datetime(df_mapped["query_created_time"], errors="coerce")
+
+            if "query_closed_time" in df_mapped.columns:
+                df_mapped["query_closed_time"] = pd.to_datetime(df_mapped["query_closed_time"], errors="coerce")
+
+            st.success("✅ CSV ready. You can replace the DB history now.")
+
+            if st.button("❌ Delete Old History & ✅ Import New CSV Data"):
+                ok_delete = delete_all_queries()
+                ok_insert = insert_bulk_queries(df_mapped)
+
+                if ok_delete and ok_insert:
+                    st.success("✅ Old history deleted and new history imported successfully!")
+                    st.rerun()
+                else:
+                    st.error("❌ Failed to delete/import. Check CMD terminal for MySQL error logs.")
+
+    st.divider()
+
+    # ================= SUPPORT MAIN VIEW =================
+    data = get_all_queries()
+    if not data:
+        st.info("No queries available.")
+        return
+
+    df = pd.DataFrame(data)
+
+    status_filter = st.selectbox("Filter by Status", ["All", "Open", "Closed"], key="support_status_filter")
+    if status_filter != "All" and "status" in df.columns:
+        df = df[df["status"] == status_filter]
+
+    st.subheader("📋 Query List (All Queries)")
+    st.dataframe(df, use_container_width=True)
+
+    st.subheader("⬇️ Export Queries")
+    st.download_button(
+        "Download Queries as CSV",
+        df.to_csv(index=False).encode("utf-8"),
+        "client_queries_export.csv",
+        "text/csv"
+    )
+
+    st.subheader("📊 Query Analytics")
+    if "status" in df.columns:
+        st.bar_chart(df["status"].value_counts())
+
+    if "query_created_time" in df.columns:
+        df["query_created_time"] = pd.to_datetime(df["query_created_time"], errors="coerce")
+        daily = df.groupby(df["query_created_time"].dt.date).size()
+        st.line_chart(daily)
+
+    st.subheader("Close a Query")
+    qid = st.number_input("Enter Query ID", min_value=1, step=1)
+    if st.button("Close This Query"):
+        ok = close_query(int(qid))
+        if ok:
+            st.success("✅ Query closed successfully")
+            st.rerun()
+        else:
+            st.warning("⚠️ Query ID not found or already closed.")
 
 
 def main():
     st.title("Client Query Submission Portal")
+    st.caption(f"Logged in as: {st.session_state.username} ({st.session_state.role})")
 
-    # Logout
-    if st.button("Logout"):
-        st.session_state.logged_in = False
-        st.session_state.role = None
-        st.rerun()
+    logout_button()
 
     mode = st.session_state.role
 
-    # ================= CLIENT =================
     if mode == "Client":
-        st.header("Submit a Query")
-
-        mail_id = st.text_input("Email ID")
-        mobile = st.text_input("Mobile Number")
-        heading = st.text_input("Query Heading")
-        description = st.text_area("Query Description")
-
-        if st.button("Submit Query"):
-            if mail_id and mobile and heading and description:
-                insert_query(mail_id, mobile, heading, description)
-                st.success("✅ Query submitted successfully!")
-            else:
-                st.warning("⚠️ Please fill all fields")
-
-        data = get_all_queries()
-        if data:
-            st.subheader("All Submitted Queries")
-            st.dataframe(pd.DataFrame(data))
-
-    # ================= SUPPORT =================
+        client_portal()
     elif mode == "Support":
-        st.header("Support Team Dashboard")
-
-        data = get_all_queries()
-        if not data:
-            st.info("No queries available.")
-            return
-
-        df = pd.DataFrame(data)
-
-        status_filter = st.selectbox("Filter by Status", ["All", "Open", "Closed"])
-        if status_filter != "All" and "status" in df.columns:
-            df = df[df["status"] == status_filter]
-
-        st.subheader("Query List")
-        st.dataframe(df)
-
-        st.subheader("⬇️ Export Queries")
-        st.download_button(
-            "Download Queries as CSV",
-            df.to_csv(index=False).encode("utf-8"),
-            "client_queries_export.csv",
-            "text/csv"
-        )
-
-        st.subheader("📊 Query Analytics")
-        if "status" in df.columns:
-            st.bar_chart(df["status"].value_counts())
-
-        if "query_created_time" in df.columns:
-            df["query_created_time"] = pd.to_datetime(df["query_created_time"], errors="coerce")
-            daily = df.groupby(df["query_created_time"].dt.date).size()
-            st.line_chart(daily)
-
-        st.subheader("Close a Query")
-        qid = st.number_input("Enter Query ID", min_value=1, step=1)
-        if st.button("Close This Query"):
-            close_query(int(qid))
-            st.success("Query closed successfully")
-
-
-
+        support_portal()
+    else:
+        st.error("Invalid role in session. Please logout and login again.")
 
 
 if __name__ == "__main__":
